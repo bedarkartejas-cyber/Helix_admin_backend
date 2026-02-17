@@ -6,7 +6,8 @@ import time
 
 # Internal modular imports
 from app.core.config import settings
-from app.api import auth, users, products, branches
+# ADDED: dashboard import here
+from app.api import auth, users, products, branches, dashboard
 
 # Initialize Logging
 logging.basicConfig(
@@ -57,6 +58,10 @@ app.include_router(products.router, prefix="/api/v1/products", tags=["Inventory"
 
 # Branch Module (Store Settings & Staff Lists)
 app.include_router(branches.router, prefix="/api/v1/branch", tags=["Store Management"])
+
+# NEW: Dashboard Module (Statistics & Summary)
+# This handles the /api/v1/dashboard/summary endpoint
+app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
 
 # ============ GLOBAL ERROR HANDLING ============
 

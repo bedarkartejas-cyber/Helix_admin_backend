@@ -1,6 +1,14 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Union
 
+# ============ SHARED UTILITIES ============
+
+def coerce_to_str(v: Any) -> str:
+    """Helper to safely convert database IDs (int) to strings."""
+    if v is None:
+        return ""
+    return str(v)
+
 # ============ AUTH & TOKEN SCHEMAS ============
 
 class Token(BaseModel):
@@ -11,7 +19,7 @@ class Token(BaseModel):
     user: Dict[str, Any]
 
 class TokenData(BaseModel):
-    """Internal helper for JWT payload data. Corrected to handle Int/Str IDs."""
+    """Internal helper for JWT payload data."""
     user_id: str
     email: str
     branch_id: str
@@ -19,28 +27,24 @@ class TokenData(BaseModel):
 
     @field_validator('user_id', 'branch_id', mode='before')
     @classmethod
-    def convert_ids_to_str(cls, v: Any) -> str:
-        """Coerces integer IDs from Supabase into strings to satisfy schema."""
-        return str(v) if v is not None else v
+    def ids_to_str(cls, v: Any) -> str:
+        return coerce_to_str(v)
 
 class RefreshTokenRequest(BaseModel):
-    """Request model for refreshing expired access tokens."""
     refresh_token: str
 
 # ============ OTP & VERIFICATION SCHEMAS ============
 
 class SendOTPRequest(BaseModel):
-    """Request to generate and dispatch a new OTP."""
     email: EmailStr
-    purpose: str = "verification"  # Options: verification, password_reset
+    purpose: str = "verification"
     
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
 class VerifyOTPRequest(BaseModel):
-    """Request to validate a user-submitted OTP code."""
     email: EmailStr
     otp: str = Field(..., min_length=6, max_length=6)
     purpose: str = "verification"
@@ -48,10 +52,10 @@ class VerifyOTPRequest(BaseModel):
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
 class VerifyOTPResponse(BaseModel):
-    """Response containing verification results or reset tokens."""
+    """Resilient response schema for OTP actions."""
     success: bool
     message: str
     attempts_remaining: Optional[int] = None
@@ -62,12 +66,10 @@ class VerifyOTPResponse(BaseModel):
 # ============ USER & PROFILE SCHEMAS ============
 
 class UserUpdate(BaseModel):
-    """Schema for partial profile updates."""
     name: Optional[str] = Field(None, min_length=2, max_length=100)
     email: Optional[EmailStr] = None
 
 class UserResponse(BaseModel):
-    """Safe public representation of a user record."""
     user_id: str
     name: str
     email: str
@@ -79,18 +81,16 @@ class UserResponse(BaseModel):
 
     @field_validator('user_id', 'branch_id', mode='before')
     @classmethod
-    def convert_ids_to_str(cls, v: Any) -> str:
-        return str(v)
+    def ids_to_str(cls, v: Any) -> str:
+        return coerce_to_str(v)
 
 class UserProfileResponse(BaseModel):
-    """Comprehensive profile view including branch context."""
     user: UserResponse
     branch: Dict[str, Any]
 
 # ============ SIGNUP & LOGIN SCHEMAS ============
 
 class FirstUserSignup(BaseModel):
-    """Primary signup for store owners/admins."""
     name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
     password: str = Field(..., min_length=8)
@@ -102,7 +102,7 @@ class FirstUserSignup(BaseModel):
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
     @model_validator(mode='after')
     def passwords_match(self) -> 'FirstUserSignup':
@@ -111,7 +111,6 @@ class FirstUserSignup(BaseModel):
         return self
 
 class InvitedUserSignup(BaseModel):
-    """Signup for staff members invited to an existing branch."""
     token: str
     name: str = Field(..., min_length=2, max_length=100)
     password: str = Field(..., min_length=8)
@@ -124,28 +123,25 @@ class InvitedUserSignup(BaseModel):
         return self
 
 class LoginRequest(BaseModel):
-    """Standard login credentials."""
     email: EmailStr
     password: str
     
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
 # ============ INVITE SCHEMAS ============
 
 class SendInviteRequest(BaseModel):
-    """Request to send a new branch invitation."""
     email: EmailStr
     
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
 class InviteResponse(BaseModel):
-    """Response after successfully creating an invitation."""
     invite_id: str
     email: str
     token: str
@@ -154,7 +150,6 @@ class InviteResponse(BaseModel):
     invite_url: str
 
 class ValidateInviteResponse(BaseModel):
-    """Response used when checking an invitation link."""
     valid: bool
     email: str
     branch_name: str
@@ -163,7 +158,7 @@ class ValidateInviteResponse(BaseModel):
 # ============ PRODUCT SCHEMAS ============
 
 class ProductCreate(BaseModel):
-    """Schema for adding new inventory items."""
+    """Restored: Schema for adding new inventory items."""
     name: str = Field(..., min_length=2)
     description: Optional[str] = None
     price: float = Field(..., gt=0)
@@ -171,7 +166,7 @@ class ProductCreate(BaseModel):
     category: Optional[str] = None
 
 class ProductUpdate(BaseModel):
-    """Schema for partial inventory updates."""
+    """Restored: Schema for partial inventory updates."""
     name: Optional[str] = None
     description: Optional[str] = None
     price: Optional[float] = Field(None, gt=0)
@@ -191,19 +186,17 @@ class ProductResponse(BaseModel):
 
     @field_validator('product_id', 'branch_id', mode='before')
     @classmethod
-    def convert_ids_to_str(cls, v: Any) -> str:
-        return str(v)
+    def ids_to_str(cls, v: Any) -> str:
+        return coerce_to_str(v)
 
 # ============ BRANCH & DASHBOARD SCHEMAS ============
 
 class BranchUpdate(BaseModel):
-    """Administrative updates to store settings."""
     branch_name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
 
 class BranchResponse(BaseModel):
-    """Store profile details."""
     branch_id: str
     branch_name: str
     address: str
@@ -212,11 +205,10 @@ class BranchResponse(BaseModel):
 
     @field_validator('branch_id', mode='before')
     @classmethod
-    def convert_ids_to_str(cls, v: Any) -> str:
-        return str(v)
+    def ids_to_str(cls, v: Any) -> str:
+        return coerce_to_str(v)
 
 class DashboardResponse(BaseModel):
-    """Aggregated data for the main management view."""
     user: UserResponse
     branch: BranchResponse
     total_users: int
@@ -226,16 +218,14 @@ class DashboardResponse(BaseModel):
 # ============ PASSWORD RESET SCHEMAS ============
 
 class ForgotPasswordRequest(BaseModel):
-    """Initial request for password reset."""
     email: EmailStr
     
     @field_validator('email')
     @classmethod
     def email_lowercase(cls, v: str) -> str:
-        return v.lower()
+        return v.lower().strip()
 
 class ResetPasswordRequest(BaseModel):
-    """Final step for password reset using the JWT token."""
     reset_token: str
     new_password: str = Field(..., min_length=8)
     confirm_password: str = Field(..., min_length=8)
