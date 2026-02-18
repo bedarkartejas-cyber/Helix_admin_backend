@@ -253,7 +253,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 import logging
 
-# Modular imports
+# Modular imports based on production project structure
 from app.core.security import (
     get_password_hash, verify_password, create_access_token,
     create_refresh_token, create_reset_token, verify_reset_token,
@@ -266,29 +266,35 @@ from app.schemas.schemas import (
     FirstUserSignup, InvitedUserSignup, LoginRequest, Token,
     SendOTPRequest, VerifyOTPRequest, VerifyOTPResponse,
     ForgotPasswordRequest, ResetPasswordRequest, SendInviteRequest,
-    TokenData
+    ValidateInviteResponse, TokenData
 )
 from app.services.otp import otp_service
 from app.dependencies import get_current_user
 from app.core.config import settings
 
+# Setup logging for production auditing
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # ============ HELPER: SAFE DATA EXTRACTION ============
 
+def safe_get(obj: Any, key: str):
+    """
+    Safely extracts a value whether the object is a dict or a Pydantic model.
+    Prevents '500 Internal Server Error' during database-to-schema mapping.
+    """
+    if obj is None:
+        return None
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
 def get_session_data(current_user: Any):
-    """Safely extracts IDs and roles from current_user (handles dict or Pydantic)."""
-    if isinstance(current_user, dict):
-        return {
-            "uid": current_user.get("user_id"),
-            "bid": current_user.get("branch_id"),
-            "is_admin": current_user.get("is_admin", False)
-        }
+    """Safely extracts IDs and roles from current_user session."""
     return {
-        "uid": getattr(current_user, "user_id", None),
-        "bid": getattr(current_user, "branch_id", None),
-        "is_admin": getattr(current_user, "is_admin", False)
+        "uid": safe_get(current_user, "user_id"),
+        "bid": safe_get(current_user, "branch_id"),
+        "email": safe_get(current_user, "email"),
+        "is_admin": safe_get(current_user, "is_admin") or False
     }
 
 # ============ AUTHENTICATION & SIGNUP ============
@@ -311,7 +317,8 @@ async def first_user_signup(signup_data: FirstUserSignup):
             "name": signup_data.name,
             "email": signup_data.email,
             "password_hash": get_password_hash(signup_data.password),
-            "is_verified": False 
+            "is_verified": False,
+            "is_admin": True # First user is always admin
         }
         
         user = await create_user_with_branch(user_data, branch_data)
@@ -328,37 +335,62 @@ async def first_user_signup(signup_data: FirstUserSignup):
         logger.error(f"First signup error: {str(e)}")
         raise HTTPException(status_code=500, detail="Signup failed")
 
+@router.get("/invite-details/{token}", response_model=ValidateInviteResponse)
+async def get_invite_details(token: str):
+    """Fetch store and inviter details."""
+    try:
+        invite = await select_one("invites", {"token": token, "is_used": False})
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite link is invalid or has expired")
+
+        branch = await select_one("branches", {"branch_id": safe_get(invite, "branch_id")})
+        admin = await select_one("users", {"user_id": safe_get(invite, "created_by")})
+
+        return ValidateInviteResponse(
+            valid=True,
+            email=safe_get(invite, "email"),
+            branch_name=safe_get(branch, "branch_name"),
+            invited_by=safe_get(admin, "name")
+        )
+    except Exception as e:
+        logger.error(f"Invite details 500 error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not retrieve invitation details")
+
 @router.post("/invite-signup", response_model=Token)
 async def invited_user_signup(signup_data: InvitedUserSignup):
-    """Signup for invited team members."""
+    """Signup for invited team members - Ensures Staff Dashboard redirection."""
     try:
         invite = await select_one("invites", {"token": signup_data.token, "is_used": False})
         if not invite:
             raise HTTPException(status_code=400, detail="Invalid or used invite token")
         
-        if datetime.now(timezone.utc) > parse_datetime(invite["expires_at"]):
+        if datetime.now(timezone.utc) > parse_datetime(safe_get(invite, "expires_at")):
             raise HTTPException(status_code=400, detail="Invite token has expired")
 
         user_data = {
             "name": signup_data.name,
-            "email": invite["email"],
+            "email": safe_get(invite, "email"),
             "password_hash": get_password_hash(signup_data.password),
-            "branch_id": invite["branch_id"],
-            "is_admin": False,
+            "branch_id": int(safe_get(invite, "branch_id")),
+            "is_admin": False, # Forced staff role
             "is_active": True,
             "is_verified": True 
         }
         
         user = await insert_one("users", user_data)
-        await update_one("invites", {"invite_id": invite["invite_id"]}, {"is_used": True})
+        if not user:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+            
+        await update_one("invites", {"invite_id": safe_get(invite, "invite_id")}, {"is_used": True})
         
         return {
             "access_token": create_access_token({
-                "user_id": str(user["user_id"]), 
-                "branch_id": str(user["branch_id"]),
-                "email": user["email"]
+                "user_id": str(safe_get(user, "user_id")), 
+                "branch_id": str(safe_get(user, "branch_id")),
+                "email": safe_get(user, "email"),
+                "is_admin": False
             }),
-            "refresh_token": create_refresh_token({"user_id": str(user["user_id"])}),
+            "refresh_token": create_refresh_token({"user_id": str(safe_get(user, "user_id"))}),
             "token_type": "bearer",
             "user": user
         }
@@ -371,23 +403,23 @@ async def login(login_data: LoginRequest):
     """Secure login with verification guard."""
     user = await select_one("users", {"email": login_data.email, "is_active": True})
     
-    if not user or not verify_password(login_data.password, user["password_hash"]):
+    if not user or not verify_password(login_data.password, safe_get(user, "password_hash")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not user.get("is_verified", False):
+    if not safe_get(user, "is_verified"):
         raise HTTPException(
             status_code=403, 
-            detail={"message": "Verification required", "requires_verification": True, "email": user["email"]}
+            detail={"message": "Verification required", "requires_verification": True, "email": safe_get(user, "email")}
         )
     
     return {
         "access_token": create_access_token({
-            "user_id": str(user["user_id"]), 
-            "email": user["email"], 
-            "branch_id": str(user["branch_id"]), 
-            "is_admin": user["is_admin"]
+            "user_id": str(safe_get(user, "user_id")), 
+            "email": safe_get(user, "email"), 
+            "branch_id": str(safe_get(user, "branch_id")), 
+            "is_admin": safe_get(user, "is_admin")
         }),
-        "refresh_token": create_refresh_token({"user_id": str(user["user_id"])}),
+        "refresh_token": create_refresh_token({"user_id": str(safe_get(user, "user_id"))}),
         "token_type": "bearer",
         "user": user
     }
@@ -395,44 +427,65 @@ async def login(login_data: LoginRequest):
 # ============ USER INVITATION SYSTEM ============
 
 @router.post("/send-invite")
-async def send_invite(request: SendInviteRequest, current_user: Any = Depends(get_current_user)):
-    """Generates an invite link for staff. Only accessible by Admins."""
-    
-    # 1. Safely extract session data to prevent AttributeErrors
+async def send_invite(
+    request: SendInviteRequest, 
+    background_tasks: BackgroundTasks, 
+    current_user: Any = Depends(get_current_user)
+):
+    """Generates an invite link for staff if not already registered."""
     session = get_session_data(current_user)
     
     if not session["is_admin"]:
         raise HTTPException(status_code=403, detail="Only admins can invite new staff members.")
 
+    email_to_invite = request.email.lower().strip()
+
+    # --- SECURITY CHECK: Block inviting self or existing users ---
+    if email_to_invite == session["email"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="You cannot invite your own email address."
+        )
+
+    existing_user = await select_one("users", {"email": email_to_invite})
+    if existing_user:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"The email {email_to_invite} is already registered as a user."
+        )
+
     try:
-        # 2. Create unique token and metadata
         token = create_invite_token()
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         
         invite_data = {
-            "email": request.email.lower(),
+            "email": email_to_invite,
             "token": token,
-            "branch_id": session["bid"], # Lock user to this store
-            "invited_by": session["uid"],
+            "branch_id": int(session["bid"]), 
+            "created_by": int(session["uid"]),
             "expires_at": expires_at.isoformat(),
             "is_used": False
         }
         
         invite = await insert_one("invites", invite_data)
         if not invite:
-            raise HTTPException(status_code=500, detail="Failed to generate invitation.")
+            raise HTTPException(status_code=500, detail="Database insertion failed.")
         
-        # 3. Construct URL
         invite_url = f"{settings.FRONTEND_URL}/signup-invite?token={token}"
+        
+        background_tasks.add_task(
+            otp_service.send_invitation_email, 
+            email_to_invite, 
+            invite_url
+        )
         
         return {
             "success": True, 
-            "message": f"Invitation link generated for {request.email}",
-            "invite_url": invite_url
+            "message": f"Invitation link generated and sent to {email_to_invite}"
         }
     except Exception as e:
         logger.error(f"Invite error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error.")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # ============ PASSWORD RECOVERY ============
 
@@ -462,7 +515,7 @@ async def reset_password(request: ResetPasswordRequest):
 
     await update_one(
         "users", 
-        {"user_id": user["user_id"]}, 
+        {"user_id": safe_get(user, "user_id")}, 
         {"password_hash": get_password_hash(request.new_password)}
     )
     return {"success": True, "message": "Password updated successfully"}
@@ -485,7 +538,7 @@ async def verify_otp(request: VerifyOTPRequest):
     if result["success"]:
         if request.purpose == "verification":
             user = await select_one("users", {"email": request.email})
-            await update_one("users", {"user_id": user["user_id"]}, {"is_verified": True})
+            await update_one("users", {"user_id": safe_get(user, "user_id")}, {"is_verified": True})
             return VerifyOTPResponse(success=True, message="Account verified successfully", user=user)
         
         elif request.purpose == "password_reset":

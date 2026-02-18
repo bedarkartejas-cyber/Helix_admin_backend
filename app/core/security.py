@@ -23,10 +23,15 @@ def create_access_token(data: dict) -> str:
     """
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    # Ensure is_admin is boolean and present
+    is_admin = to_encode.get("is_admin", False)
+    
     to_encode.update({
         "exp": expire,
         "type": "access",
-        "iss": "store-management-system"
+        "iss": "store-management-system",
+        "is_admin": bool(is_admin)
     })
     return jwt.encode(to_encode, settings.APP_SECRET_KEY, algorithm=settings.ALGORITHM)
 
@@ -65,7 +70,7 @@ def create_reset_token(email: str) -> str:
 
 def verify_token(token: str, expected_type: str = "access") -> Optional[TokenData]:
     """
-    Decodes and validates a JWT. Corrected to handle Integer IDs from Supabase.
+    Decodes and validates a JWT. Handles Integer IDs and Role extraction.
     """
     try:
         payload = jwt.decode(
@@ -74,21 +79,27 @@ def verify_token(token: str, expected_type: str = "access") -> Optional[TokenDat
             algorithms=[settings.ALGORITHM]
         )
         
-        # Security Guard: Ensure the token type matches the intended use
+        # 1. Type Guard: Prevents using a reset token as an access token
         if payload.get("type") != expected_type:
             logger.warning(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")
             return None
 
-        # Fix: Explicitly cast IDs to string to prevent Pydantic validation errors
-        # when the database/JWT contains integer IDs (e.g., 49, 40)
+        # 2. Extract and Normalize Data
+        # We cast IDs to strings to match Pydantic schemas, even if Supabase returns Ints
         user_id = str(payload.get("user_id")) if payload.get("user_id") is not None else None
         branch_id = str(payload.get("branch_id")) if payload.get("branch_id") is not None else None
         email = payload.get("email")
-        is_admin = payload.get("is_admin", False)
         
-        # Validate required claims for the TokenData schema
+        # Role Extraction: Default to False for safety
+        is_admin = payload.get("is_admin")
+        if isinstance(is_admin, str):
+            is_admin = is_admin.lower() == 'true'
+        else:
+            is_admin = bool(is_admin)
+
+        # 3. Validation
         if not all([user_id, email, branch_id]):
-            logger.error(f"Missing required token claims. Got user_id={user_id}, email={email}, branch_id={branch_id}")
+            logger.error(f"Missing required token claims for user {email}")
             return None
             
         return TokenData(
@@ -102,9 +113,7 @@ def verify_token(token: str, expected_type: str = "access") -> Optional[TokenDat
         return None
 
 def verify_reset_token(token: str) -> Optional[str]:
-    """
-    Validates password reset tokens and returns the associated email.
-    """
+    """Validates password reset tokens and returns the email."""
     try:
         payload = jwt.decode(token, settings.APP_SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != "password_reset":
@@ -114,22 +123,21 @@ def verify_reset_token(token: str) -> Optional[str]:
         return None
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Securely compares a plain password with its hashed version using bcrypt.
-    """
+    """Securely compares passwords using bcrypt."""
     try:
+        # Standard bcrypt check
         return bcrypt.checkpw(
             plain_password.encode('utf-8'),
             hashed_password.encode('utf-8')
         )
     except Exception:
+        # Fallback to passlib if hash format varies
         return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    """
-    Generates a secure bcrypt hash with 12 rounds of salting.
-    """
+    """Generates a secure bcrypt hash with 12 rounds."""
     password_bytes = password.encode('utf-8')
+    # Bcrypt has a 72-byte limit
     if len(password_bytes) > 72:
         password_bytes = password_bytes[:72]
     
@@ -138,7 +146,7 @@ def get_password_hash(password: str) -> str:
     return hashed.decode('utf-8')
 
 def format_datetime(dt: datetime) -> str:
-    """Standardizes datetime for storage in ISO 8601 format."""
+    """Standardizes datetime for ISO 8601 storage."""
     return dt.isoformat()
 
 def parse_datetime(dt_str: str) -> datetime:

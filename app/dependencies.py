@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional
+from typing import Optional, Any
 
 # Updated imports to reflect modular structure
 from app.core.security import verify_token
@@ -8,6 +8,12 @@ from app.db.supabase import select_one
 
 # Initializing security scheme for Bearer token injection
 security = HTTPBearer(auto_error=False)
+
+def safe_get(obj: Any, key: str):
+    """Safely extracts a value whether the object is a dict or a Pydantic/Class object."""
+    if obj is None:
+        return None
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
@@ -19,39 +25,46 @@ async def get_current_user(
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
+            detail="No authorization header found",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Verify token using centralized security logic
+    # 1. Verify token using centralized security logic
+    # This checks expiration, signature, and required claims (user_id, email, etc.)
     token_data = verify_token(credentials.credentials)
+    
     if token_data is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="Token is invalid, expired, or malformed",
         )
     
-    # Fetch user from the centralized database layer
-    # This replaces the old supabase_client.py import
+    # 2. Fetch user from the database
+    # We query by user_id and ensure the user is active
     user = await select_one("users", {"user_id": token_data.user_id, "is_active": True})
     
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or account is inactive",
+            detail="User account no longer exists or is inactive",
         )
     
-    return user
+    # Return as dict to ensure compatibility with existing logic
+    return user if isinstance(user, dict) else user.dict()
 
 async def get_current_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
     """
     Dependency to restrict access to endpoints that require 
-    administrative privileges at the branch level.
+    administrative privileges.
     """
-    # Enforce strict admin check based on database flag
-    if not current_user.get("is_admin", False):
+    # 3. Enforce strict admin check
+    # Uses safe_get to handle potential object/dict mismatch
+    is_admin = safe_get(current_user, "is_admin")
+    
+    if not is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrative privileges are required for this action"
+            detail="Access denied: Admin privileges required"
         )
+        
     return current_user
