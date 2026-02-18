@@ -55,7 +55,6 @@ class VerifyOTPRequest(BaseModel):
         return v.lower().strip()
 
 class VerifyOTPResponse(BaseModel):
-    """Resilient response schema for OTP actions."""
     success: bool
     message: str
     attempts_remaining: Optional[int] = None
@@ -87,6 +86,71 @@ class UserResponse(BaseModel):
 class UserProfileResponse(BaseModel):
     user: UserResponse
     branch: Dict[str, Any]
+
+# ============ PRODUCT OFFER SCHEMAS ============
+
+class BankOffer(BaseModel):
+    """Schema for credit/debit card bank discounts."""
+    bank_name: str
+    card_type: str  # e.g., Credit Card, Debit Card
+    discount_percent: float
+    max_discount_amount: float
+    min_purchase_amount: float
+
+class EMIOffer(BaseModel):
+    """Schema for bank EMI plans."""
+    bank_name: str
+    tenure_months: int
+    interest_rate: float  # 0 for No Cost EMI
+    min_purchase_amount: float
+
+class UPIOffer(BaseModel):
+    """Schema for digital wallet/UPI discounts."""
+    platform_name: str  # GPay, PhonePe, UPI
+    discount_amount: float
+    is_flat_discount: bool = True
+
+# ============ PRODUCT & INVENTORY SCHEMAS ============
+
+class ProductCreate(BaseModel):
+    """Stores product data with dedicated image and catalog links."""
+    name: str = Field(..., min_length=2)
+    images: Optional[str] = None   # URL to product image
+    url_link: Optional[str] = None # URL to actual external product/laptop page
+    price: float = Field(..., gt=0)
+    stock_quantity: int = Field(..., ge=0)
+    category: Optional[str] = None
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    images: Optional[str] = None
+    url_link: Optional[str] = None
+    price: Optional[float] = Field(None, gt=0)
+    stock_quantity: Optional[int] = Field(None, ge=0)
+    category: Optional[str] = None
+
+class ProductResponse(BaseModel):
+    """Basic product response including catalog link."""
+    product_id: str
+    name: str
+    images: Optional[str] = None
+    url_link: Optional[str] = None
+    price: float
+    stock_quantity: int
+    category: Optional[str] = None
+    branch_id: str
+    created_at: str
+
+    @field_validator('product_id', 'branch_id', mode='before')
+    @classmethod
+    def ids_to_str(cls, v: Any) -> str:
+        return coerce_to_str(v)
+
+class ProductDetailResponse(ProductResponse):
+    """Aggregated laptop details with all offer types."""
+    bank_offers: List[BankOffer] = []
+    emi_offers: List[EMIOffer] = []
+    upi_offers: List[UPIOffer] = []
 
 # ============ SIGNUP & LOGIN SCHEMAS ============
 
@@ -141,57 +205,16 @@ class SendInviteRequest(BaseModel):
     def email_lowercase(cls, v: str) -> str:
         return v.lower().strip()
 
-class InviteResponse(BaseModel):
-    invite_id: str
-    email: str
-    token: str
-    expires_at: str
-    status: str = "sent"
-    invite_url: str
-
 class ValidateInviteResponse(BaseModel):
     valid: bool
     email: str
     branch_name: str
     invited_by: str
 
-# ============ PRODUCT SCHEMAS ============
-
-class ProductCreate(BaseModel):
-    """Restored: Schema for adding new inventory items."""
-    name: str = Field(..., min_length=2)
-    description: Optional[str] = None
-    price: float = Field(..., gt=0)
-    stock_quantity: int = Field(..., ge=0)
-    category: Optional[str] = None
-
-class ProductUpdate(BaseModel):
-    """Restored: Schema for partial inventory updates."""
-    name: Optional[str] = None
-    description: Optional[str] = None
-    price: Optional[float] = Field(None, gt=0)
-    stock_quantity: Optional[int] = Field(None, ge=0)
-    category: Optional[str] = None
-
-class ProductResponse(BaseModel):
-    """Inventory item details for API output."""
-    product_id: str
-    name: str
-    description: Optional[str] = None
-    price: float
-    stock_quantity: int
-    category: Optional[str] = None
-    branch_id: str
-    created_at: str
-
-    @field_validator('product_id', 'branch_id', mode='before')
-    @classmethod
-    def ids_to_str(cls, v: Any) -> str:
-        return coerce_to_str(v)
-
 # ============ BRANCH & DASHBOARD SCHEMAS ============
 
 class BranchUpdate(BaseModel):
+    """RESTORED: Missing class required by branches.py logic."""
     branch_name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None

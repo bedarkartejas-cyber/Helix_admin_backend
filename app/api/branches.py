@@ -18,23 +18,28 @@ router = APIRouter()
 async def get_branch_settings(current_user: dict = Depends(get_current_admin_user)):
     """
     Retrieve the current store/branch details for the administrator.
-    Verification: Automatically restricted to the administrator's own branch_id.
+    Verification: Automatically restricted to the administrator's own branch_id from JWT.
     """
     try:
         # Fetch branch details using the branch_id from the authenticated admin's token
         branch = await select_one("branches", {"branch_id": current_user["branch_id"]})
+        
         if not branch:
             logger.warning(f"⚠️ Branch {current_user['branch_id']} not found for admin {current_user['user_id']}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, 
                 detail="Branch details could not be located"
             )
+            
         return branch
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Error fetching branch settings: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Internal server error while retrieving settings"
+        )
 
 @router.put("/settings", response_model=BranchResponse)
 async def update_branch_settings(
@@ -47,17 +52,26 @@ async def update_branch_settings(
     """
     logger.info(f"🔄 Admin {current_user['user_id']} is updating settings for branch {current_user['branch_id']}")
     
-    # Standardizing to model_dump() for Pydantic v2 compatibility
+    # 1. Prepare data using Pydantic v2 model_dump
+    update_data = settings_data.model_dump(exclude_unset=True)
+    
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="No valid update fields provided"
+        )
+
+    # 2. Apply update strictly to the admin's branch_id
     updated_branch = await update_one(
         "branches", 
         {"branch_id": current_user["branch_id"]}, 
-        settings_data.model_dump(exclude_unset=True)
+        update_data
     )
     
     if not updated_branch:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Failed to apply branch setting updates"
+            detail="Failed to apply branch setting updates to the database"
         )
     
     logger.info(f"✅ Branch settings updated successfully for branch {current_user['branch_id']}")
@@ -72,9 +86,17 @@ async def get_branch_staff(current_user: dict = Depends(get_current_admin_user))
     Admin Only: Restricted to branch administrators.
     """
     try:
-        # Fetch staff members specifically associated with the admin's branch
+        # Fetch staff members specifically associated with the admin's branch_id
+        # This uses the specialized helper in app/db/supabase.py
         staff = await get_users_by_branch(current_user["branch_id"])
+        
+        if staff is None:
+            return []
+            
         return staff
     except Exception as e:
         logger.error(f"❌ Error fetching branch staff: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve staff list")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Failed to retrieve staff list from the database"
+        )

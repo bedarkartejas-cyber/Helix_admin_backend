@@ -1,5 +1,6 @@
 from supabase import create_client, Client
 from app.core.config import settings
+from typing import Dict, Any, List, Optional
 import logging
 
 # Setup structured logging for database auditing
@@ -14,7 +15,7 @@ supabase: Client = create_client(
 
 # ============ CORE CRUD HELPERS ============
 
-async def insert_one(table: str, data: dict):
+async def insert_one(table: str, data: dict) -> Optional[Dict[str, Any]]:
     """
     Inserts a single record into the specified table.
     Returns the inserted record or None if the operation fails.
@@ -28,7 +29,7 @@ async def insert_one(table: str, data: dict):
         logger.error(f"❌ DB Insert Error [{table}]: {str(e)}")
         return None
 
-async def select_one(table: str, filters: dict):
+async def select_one(table: str, filters: dict) -> Optional[Dict[str, Any]]:
     """
     Retrieves the first record matching the provided filters.
     """
@@ -43,10 +44,27 @@ async def select_one(table: str, filters: dict):
         logger.error(f"❌ DB Select Error [{table}]: {str(e)}")
         return None
 
-async def select_all(table: str, filters: dict = None):
+async def select_many(table: str, filters: dict) -> List[Dict[str, Any]]:
+    """
+    FIX: Retrieves all records matching filters. 
+    Essential for fetching Bank Offers, EMI Plans, and UPI Discounts.
+    """
+    try:
+        query = supabase.table(table).select("*")
+        if filters:
+            for key, value in filters.items():
+                query = query.eq(key, value)
+        
+        result = query.execute()
+        return result.data if result.data else []
+    except Exception as e:
+        logger.error(f"❌ DB Select Many Error [{table}]: {str(e)}")
+        return []
+
+async def select_all(table: str, filters: dict = None) -> List[Dict[str, Any]]:
     """
     Retrieves all records matching the filters.
-    Returns an empty list if no records are found or an error occurs.
+    Returns an empty list if no records are found.
     """
     try:
         query = supabase.table(table).select("*")
@@ -60,7 +78,7 @@ async def select_all(table: str, filters: dict = None):
         logger.error(f"❌ DB Select All Error [{table}]: {str(e)}")
         return []
 
-async def update_one(table: str, filters: dict, data: dict):
+async def update_one(table: str, filters: dict, data: dict) -> Optional[Dict[str, Any]]:
     """
     Updates records matching the filters with the provided data.
     """
@@ -81,7 +99,6 @@ async def update_one(table: str, filters: dict, data: dict):
 async def delete_one(table: str, filters: dict) -> bool:
     """
     Deletes records matching the filters.
-    Returns True if at least one record was deleted, False otherwise.
     """
     try:
         if not filters:
@@ -99,7 +116,7 @@ async def delete_one(table: str, filters: dict) -> bool:
 
 # ============ SPECIFIC BUSINESS OPERATIONS ============
 
-async def create_user_with_branch(user_data: dict, branch_data: dict):
+async def create_user_with_branch(user_data: dict, branch_data: dict) -> Optional[Dict[str, Any]]:
     """
     Atomic-like operation to create a branch and its first admin user.
     """
@@ -111,11 +128,10 @@ async def create_user_with_branch(user_data: dict, branch_data: dict):
             return None
             
         # 2. Prepare user data with the new branch ID
-        # Ensuring branch_id is treated as a string or int based on DB requirements
         user_data.update({
             "branch_id": branch["branch_id"],
-            "is_admin": True,      # First user is always admin
-            "is_verified": False,  # Verification required via OTP
+            "is_admin": True,
+            "is_verified": False,
             "is_active": True
         })
         
@@ -123,7 +139,6 @@ async def create_user_with_branch(user_data: dict, branch_data: dict):
         user = await insert_one("users", user_data)
         if not user:
             logger.error(f"Failed to create admin user for branch {branch['branch_id']}.")
-            # Note: In a true production environment, you might consider deleting the orphaned branch here.
             return None
             
         return user
@@ -131,9 +146,8 @@ async def create_user_with_branch(user_data: dict, branch_data: dict):
         logger.error(f"❌ Critical Signup Transaction Error: {str(e)}")
         return None
 
-async def get_users_by_branch(branch_id: str):
+async def get_users_by_branch(branch_id: Any) -> List[Dict[str, Any]]:
     """
     Helper to fetch all users belonging to a specific store.
     """
-    # Cast branch_id to string to ensure compatibility with TokenData schema expectations
     return await select_all("users", {"branch_id": str(branch_id)})
