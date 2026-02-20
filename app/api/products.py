@@ -703,7 +703,7 @@ from typing import List, Dict, Any, Optional
 import logging
 import math
 
-# Modular imports from your production structure
+# Modular Database and Security imports
 from app.db.supabase import (
     insert_one, select_all, select_one, update_one, delete_one, select_many
 )
@@ -713,7 +713,7 @@ from app.schemas.schemas import (
     CardOfferBase, EMIPlan, UPIOffer
 )
 
-# Setup logging for production monitoring
+# Production-grade logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -724,56 +724,58 @@ router = APIRouter()
 def get_actual_id(o: Dict[str, Any]) -> Optional[str]:
     """
     Unified ID extractor that maps various SQL primary keys to a single 'id' 
-    for the React frontend to consume easily.
+    for the React frontend. Handles all offer table variations.
     """
     val = (
-        o.get("cc_offer_id") or      # Credit Card
-        o.get("dc_offer_id") or      # Debit Card
-        o.get("emi_plan_id") or      # EMI Plans
-        o.get("upi_offer_id") or     # UPI Offers
-        o.get("product_id") or       # Product Core
-        o.get("id")                  # Fallback
+        o.get("cc_offer_id") or      # Table: credit_card_offers
+        o.get("dc_offer_id") or      # Table: debit_card_offers
+        o.get("emi_plan_id") or      # Table: emi_plans
+        o.get("upi_offer_id") or     # Table: upi_offers
+        o.get("product_id") or       # Table: products
+        o.get("id")                  # General Fallback
     )
     return str(val) if val is not None else None
 
 def validate_id(id_val: str):
-    """Safety check for ID validity to prevent 'undefined' string errors."""
-    if not id_val or str(id_val).lower() in ["none", "undefined"]:
-        logger.warning(f"Invalid ID attempted: {id_val}")
+    """Prevents common frontend bugs like passing 'undefined' or 'null' as strings."""
+    if not id_val or str(id_val).lower() in ["none", "undefined", "null"]:
+        logger.error(f"Validation Failure: Received invalid ID {id_val}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="A valid Database ID is required for this operation."
+            detail="A valid Database ID is required. Received 'undefined' or 'null'."
         )
 
 async def calculate_emi_details(product_id: str, plan_data: dict) -> dict:
-    """Core Financial Logic: Calculates EMI installments and totals."""
-    search_id = int(product_id) if product_id.isdigit() else product_id
+    """
+    Recalculates monthly installments and total repayment.
+    Ensures financial data is accurate even if the interest rate or tenure changes.
+    """
+    search_id = int(product_id) if str(product_id).isdigit() else product_id
     product = await select_one("products", {"product_id": search_id})
     
     if not product:
-        raise HTTPException(status_code=404, detail="Product not found for EMI calculation")
+        raise HTTPException(status_code=404, detail="Product not found for financial calculation")
     
-    product_price = float(product.get("price", 0))
+    price = float(product.get("price", 0))
     tenure = int(plan_data.get("tenure_months", 6))
     interest_rate_pa = float(plan_data.get("interest_rate_pa", 0))
-    processing_fee = int(plan_data.get("processing_fee", 0))
+    fee = int(plan_data.get("processing_fee", 0))
     is_no_cost = plan_data.get("is_no_cost_emi", False)
 
     if is_no_cost:
-        monthly_installment = math.ceil(product_price / tenure)
-        total_repayment = (monthly_installment * tenure) + processing_fee
+        monthly_installment = math.ceil(price / tenure)
+        total_repayment = (monthly_installment * tenure) + fee
         actual_interest = 0.0
     else:
-        monthly_interest_rate = (interest_rate_pa / 12) / 100
-        if monthly_interest_rate > 0:
-            pow_factor = (1 + monthly_interest_rate) ** tenure
-            emi_numerator = product_price * monthly_interest_rate * pow_factor
-            emi_denominator = pow_factor - 1
-            monthly_installment = math.ceil(emi_numerator / emi_denominator)
+        # Standard Amortization Formula for EMI
+        monthly_rate = (interest_rate_pa / 12) / 100
+        if monthly_rate > 0:
+            pow_factor = (1 + monthly_rate) ** tenure
+            monthly_installment = math.ceil((price * monthly_rate * pow_factor) / (pow_factor - 1))
         else:
-            monthly_installment = math.ceil(product_price / tenure)
+            monthly_installment = math.ceil(price / tenure)
         
-        total_repayment = (monthly_installment * tenure) + processing_fee
+        total_repayment = (monthly_installment * tenure) + fee
         actual_interest = interest_rate_pa
 
     return {
@@ -785,7 +787,7 @@ async def calculate_emi_details(product_id: str, plan_data: dict) -> dict:
         "interest_rate_pa": actual_interest,
         "total_repayment_amount": total_repayment,
         "is_no_cost_emi": is_no_cost,
-        "processing_fee": processing_fee,
+        "processing_fee": fee,
         "min_purchase_amount": plan_data.get("min_purchase_amount", 0),
         "offer_text": f"No-Cost EMI for {tenure}m" if is_no_cost else f"₹{monthly_installment}/mo for {tenure}m"
     }
@@ -794,80 +796,76 @@ async def calculate_emi_details(product_id: str, plan_data: dict) -> dict:
 
 @router.get("/", response_model=List[ProductResponse])
 async def get_products(current_user: dict = Depends(get_current_user)):
-    try:
-        return await select_all("products", {"branch_id": current_user["branch_id"]})
-    except Exception as e:
-        logger.error(f"Failed to fetch products: {str(e)}")
-        return []
+    """Fetches all products for the current branch."""
+    return await select_all("products", {"branch_id": current_user["branch_id"]})
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def create_product(
-    product: ProductCreate, 
-    current_user: dict = Depends(get_current_admin_user)
-):
-    """FIXED: Handles 'created_by' constraint and branch mapping."""
-    try:
-        data = product.model_dump()
-        data["branch_id"] = current_user["branch_id"]
-        data["created_by"] = current_user.get("user_id") 
-        
-        logger.info(f"Creating product for branch {data['branch_id']} by user {data['created_by']}")
-        return await insert_one("products", data)
-    except Exception as e:
-        logger.error(f"Creation Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database insertion failed: {str(e)}")
+async def create_product(product: ProductCreate, current_user: dict = Depends(get_current_admin_user)):
+    """Creates a product and links it to the logged-in admin's branch."""
+    data = product.model_dump()
+    data["branch_id"] = current_user["branch_id"]
+    data["created_by"] = current_user.get("user_id") 
+    return await insert_one("products", data)
 
 @router.put("/{product_id}")
-async def update_product_details(
-    product_id: str, 
-    update_data: ProductUpdate, 
-    current_user: dict = Depends(get_current_admin_user)
-):
+async def update_product_details(product_id: str, update_data: ProductUpdate, current_user: dict = Depends(get_current_admin_user)):
+    """Updates product details within the same branch."""
     validate_id(product_id)
     payload = update_data.model_dump(exclude_unset=True)
     clean_id = int(product_id) if product_id.isdigit() else product_id
-
-    try:
-        filters = {"product_id": clean_id, "branch_id": current_user["branch_id"]}
-        result = await update_one("products", filters, payload)
-        if not result:
-            raise HTTPException(status_code=404, detail="Product not found or unauthorized.")
-        return result
-    except Exception as e:
-        logger.error(f"Update Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Backend Update Failed: {str(e)}")
+    filters = {"product_id": clean_id, "branch_id": current_user["branch_id"]}
+    return await update_one("products", filters, payload)
 
 @router.delete("/{product_id}")
 async def delete_product(product_id: str, current_user: dict = Depends(get_current_admin_user)):
+    """Deletes a product from the branch inventory."""
     validate_id(product_id)
     clean_id = int(product_id) if product_id.isdigit() else product_id
     return await delete_one("products", {"product_id": clean_id, "branch_id": current_user["branch_id"]})
 
-# ============ FINANCIAL OFFER OPERATIONS (FIXED 404s) ============
+# ============ FINANCIAL OFFER OPERATIONS (FIXED 405s & 404s) ============
 
 # --- 1. Credit Card Offers ---
 @router.post("/{product_id}/credit-card-offers", status_code=201)
 async def add_cc_offer(product_id: str, offer: CardOfferBase):
-    clean_id = int(product_id) if product_id.isdigit() else product_id
     data = offer.model_dump()
-    data["product_id"] = clean_id
+    data["product_id"] = int(product_id) if product_id.isdigit() else product_id
     return await insert_one("credit_card_offers", data)
 
-# --- 2. Debit Card Offers (FIXED 404) ---
+@router.put("/{product_id}/credit-card-offers/{offer_id}")
+async def update_cc_offer(product_id: str, offer_id: str, offer: CardOfferBase):
+    validate_id(offer_id)
+    p_id = int(product_id) if product_id.isdigit() else product_id
+    o_id = int(offer_id) if offer_id.isdigit() else offer_id
+    return await update_one("credit_card_offers", {"cc_offer_id": o_id, "product_id": p_id}, offer.model_dump())
+
+# --- 2. Debit Card Offers ---
 @router.post("/{product_id}/debit-card-offers", status_code=201)
 async def add_dc_offer(product_id: str, offer: CardOfferBase):
-    clean_id = int(product_id) if product_id.isdigit() else product_id
     data = offer.model_dump()
-    data["product_id"] = clean_id
+    data["product_id"] = int(product_id) if product_id.isdigit() else product_id
     return await insert_one("debit_card_offers", data)
 
-# --- 3. UPI Offers (FIXED 404) ---
+@router.put("/{product_id}/debit-card-offers/{offer_id}")
+async def update_dc_offer(product_id: str, offer_id: str, offer: CardOfferBase):
+    validate_id(offer_id)
+    p_id = int(product_id) if product_id.isdigit() else product_id
+    o_id = int(offer_id) if offer_id.isdigit() else offer_id
+    return await update_one("debit_card_offers", {"dc_offer_id": o_id, "product_id": p_id}, offer.model_dump())
+
+# --- 3. UPI Offers ---
 @router.post("/{product_id}/upi-offers", status_code=201)
 async def add_upi_offer(product_id: str, offer: UPIOffer):
-    clean_id = int(product_id) if product_id.isdigit() else product_id
     data = offer.model_dump()
-    data["product_id"] = clean_id
+    data["product_id"] = int(product_id) if product_id.isdigit() else product_id
     return await insert_one("upi_offers", data)
+
+@router.put("/{product_id}/upi-offers/{offer_id}")
+async def update_upi_offer(product_id: str, offer_id: str, offer: UPIOffer):
+    validate_id(offer_id)
+    p_id = int(product_id) if product_id.isdigit() else product_id
+    o_id = int(offer_id) if offer_id.isdigit() else offer_id
+    return await update_one("upi_offers", {"upi_offer_id": o_id, "product_id": p_id}, offer.model_dump())
 
 # --- 4. EMI Plans ---
 @router.post("/{product_id}/emi-plans", status_code=201)
@@ -875,10 +873,20 @@ async def add_emi_plan(product_id: str, plan: EMIPlan):
     db_ready_data = await calculate_emi_details(product_id, plan.model_dump())
     return await insert_one("emi_plans", db_ready_data)
 
-# ============ CONSOLIDATED VIEWS & GENERIC OPS ============
+@router.put("/{product_id}/emi-plans/{offer_id}")
+async def update_emi_plan(product_id: str, offer_id: str, plan: EMIPlan):
+    validate_id(offer_id)
+    # Automatically recalculates installments if price or interest was changed
+    db_ready_data = await calculate_emi_details(product_id, plan.model_dump())
+    p_id = int(product_id) if product_id.isdigit() else product_id
+    o_id = int(offer_id) if offer_id.isdigit() else offer_id
+    return await update_one("emi_plans", {"emi_plan_id": o_id, "product_id": p_id}, db_ready_data)
+
+# ============ CONSOLIDATED VIEWS & GENERIC DELETE ============
 
 @router.get("/{product_id}/all-offers")
 async def get_all_offers_consolidated(product_id: str):
+    """Returns a unified list of all available offers for a product."""
     clean_id = int(product_id) if product_id.isdigit() else product_id
     
     def normalize_offer(offer_list, offer_type):
@@ -900,19 +908,21 @@ async def get_all_offers_consolidated(product_id: str):
 
 @router.delete("/{product_id}/{route}/{offer_id}")
 async def generic_delete_offer(product_id: str, route: str, offer_id: str):
+    """Unified delete route that maps frontend route-names to SQL tables."""
     validate_id(offer_id)
     p_id = int(product_id) if product_id.isdigit() else product_id
     o_id = int(offer_id) if offer_id.isdigit() else offer_id
     
-    route_to_key = {
+    # Mapping frontend kebab-case routes to (Table Name, Primary Key Column)
+    mapping = {
         "credit-card-offers": ("credit_card_offers", "cc_offer_id"),
         "debit-card-offers": ("debit_card_offers", "dc_offer_id"),
         "emi-plans": ("emi_plans", "emi_plan_id"),
         "upi-offers": ("upi_offers", "upi_offer_id")
     }
     
-    if route not in route_to_key:
+    if route not in mapping:
         raise HTTPException(status_code=400, detail="Invalid offer route.")
     
-    table_name, key_column = route_to_key[route]
+    table_name, key_column = mapping[route]
     return await delete_one(table_name, {key_column: o_id, "product_id": p_id})
