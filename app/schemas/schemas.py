@@ -12,14 +12,12 @@ def coerce_to_str(v: Any) -> str:
 # ============ AUTH & TOKEN SCHEMAS ============
 
 class Token(BaseModel):
-    """Standard Bearer token response."""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     user: Dict[str, Any]
 
 class TokenData(BaseModel):
-    """Internal helper for JWT payload data."""
     user_id: str
     email: str
     branch_id: str
@@ -87,36 +85,57 @@ class UserProfileResponse(BaseModel):
     user: UserResponse
     branch: Dict[str, Any]
 
-# ============ PRODUCT OFFER SCHEMAS ============
+# ============ PROFESSIONAL FINANCIAL SCHEMAS (UPDATED) ============
 
-class BankOffer(BaseModel):
-    """Schema for credit/debit card bank discounts."""
+class CardOfferBase(BaseModel):
+    """Deep detail schema for Credit and Debit card offers."""
     bank_name: str
-    card_type: str  # e.g., Credit Card, Debit Card
+    bank_logo_url: Optional[str] = None
+    card_network: str  # Visa, Mastercard, Rupay, Amex
+    network_logo_url: Optional[str] = None
+    offer_type: str = "Instant Discount" 
     discount_percent: float
-    max_discount_amount: float
-    min_purchase_amount: float
+    min_purchase_value: int = 0
+    max_discount_amount: int = 0
+    offer_description: Optional[str] = None
+    tnc_link: Optional[str] = None
 
-class EMIOffer(BaseModel):
-    """Schema for bank EMI plans."""
-    bank_name: str
+class EMIPlan(BaseModel):
+    """
+    Detailed EMI breakdown. 
+    Fields like monthly_installment and total_repayment are Optional 
+    because the Backend calculates them automatically based on Product Price.
+    """
+    institute_name: str
+    institute_logo_url: Optional[str] = None
     tenure_months: int
-    interest_rate: float  # 0 for No Cost EMI
-    min_purchase_amount: float
+    interest_rate_pa: float = 0.0
+    is_no_cost_emi: bool = False
+    processing_fee: Optional[int] = 0
+    min_purchase_amount: Optional[int] = 0
+    # Calculations are handled by the server
+    monthly_installment: Optional[int] = None 
+    total_interest_paid: Optional[int] = None
+    total_repayment_amount: Optional[int] = None
+    offer_text: Optional[str] = None
 
 class UPIOffer(BaseModel):
-    """Schema for digital wallet/UPI discounts."""
-    platform_name: str  # GPay, PhonePe, UPI
+    """Deep detail schema for Digital Wallet/UPI discounts."""
+    platform_name: str 
+    platform_logo_url: Optional[str] = None
+    offer_type: str = "Instant Discount"
     discount_amount: float
+    min_purchase_value: int = 0
     is_flat_discount: bool = True
+    offer_description: Optional[str] = None
+    max_cashback: Optional[int] = None
 
 # ============ PRODUCT & INVENTORY SCHEMAS ============
 
 class ProductCreate(BaseModel):
-    """Stores product data with dedicated image and catalog links."""
     name: str = Field(..., min_length=2)
-    images: Optional[str] = None   # URL to product image
-    url_link: Optional[str] = None # URL to actual external product/laptop page
+    images: Optional[str] = None   
+    url_link: Optional[str] = None 
     price: float = Field(..., gt=0)
     stock_quantity: int = Field(..., ge=0)
     category: Optional[str] = None
@@ -130,7 +149,6 @@ class ProductUpdate(BaseModel):
     category: Optional[str] = None
 
 class ProductResponse(BaseModel):
-    """Basic product response including catalog link."""
     product_id: str
     name: str
     images: Optional[str] = None
@@ -147,9 +165,10 @@ class ProductResponse(BaseModel):
         return coerce_to_str(v)
 
 class ProductDetailResponse(ProductResponse):
-    """Aggregated laptop details with all offer types."""
-    bank_offers: List[BankOffer] = []
-    emi_offers: List[EMIOffer] = []
+    """The 'Master' response containing all deep financial data."""
+    credit_card_offers: List[CardOfferBase] = []
+    debit_card_offers: List[CardOfferBase] = []
+    emi_plans: List[EMIPlan] = []
     upi_offers: List[UPIOffer] = []
 
 # ============ SIGNUP & LOGIN SCHEMAS ============
@@ -214,7 +233,6 @@ class ValidateInviteResponse(BaseModel):
 # ============ BRANCH & DASHBOARD SCHEMAS ============
 
 class BranchUpdate(BaseModel):
-    """RESTORED: Missing class required by branches.py logic."""
     branch_name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
